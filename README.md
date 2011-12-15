@@ -21,5 +21,5 @@ and unit_test_framework.
     mkdir build
     cd build
     cmake ..
-    make -j 2 # or more if you have more cores
+    make
 
