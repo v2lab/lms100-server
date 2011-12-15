@@ -228,11 +228,7 @@ struct push_back_u32_impl {
     push_back_u32_impl(Container & vec_) : vec(vec_) {}
     void operator()(unsigned val) const
     {
-        if (val <= INT32_MAX)
-            vec.push_back( (long)val);
-        else
-            // max only supports signed 32bit integers, we've got to convert to floating point
-            vec.push_back( (float)val );
+        vec.push_back( (long)val);
     }
 };
 template < typename Container >
@@ -245,7 +241,7 @@ template < typename Container >
 struct push_back_int_impl {
     Container & vec;
     push_back_int_impl(Container & vec_) : vec(vec_) {}
-    void operator()(unsigned val) const { vec.push_back( *(long*)(&val) ); }
+    void operator()(int32_t val) const { vec.push_back( (long)val ); }
 };
 template < typename Container >
 push_back_int_impl<Container> push_back_int_a(Container & cont)
@@ -295,9 +291,12 @@ push_back_bool_impl<Container> push_back_bool_a(Container & cont, int true_ = 1)
 struct send_data_a {
     Lms100::ChannelReceiver const& recv;
     int const&i, &n;
-    float* & data;
-    send_data_a(Lms100::ChannelReceiver const&  recv_, int const&  i_, int const&  n_, float* &  data_) : recv(recv_),i(i_),n(n_),data(data_) {}
-    template< typename Num > void operator() (Num) const { recv( i, n, data ); }
+    float* data;
+    send_data_a(Lms100::ChannelReceiver const&  recv_, int const&  i_, int const&  n_, float* data_) : recv(recv_),i(i_),n(n_),data(data_) {}
+    template< typename Num > void operator() (Num) const {
+        if (recv)
+            recv( i, n, data );
+    }
     template< typename First, typename Second > void operator() (First, Second) const {
         if (recv)
             recv( i, n, data );
@@ -409,15 +408,15 @@ struct LmsParser : public grammar<LmsParser>
     template <typename ScannerT>
     struct definition
     {
-        definition(LmsParser const& self)
-        {
-            int i, j, n, ch_idx;
-            union hex_float { unsigned u; float f; };
-            hex_float scaler;
+        int i, j, n, ch_idx;
+        union hex_float { uint32_t u; float f; };
+        hex_float scaler;
 
 #define LMS_MAX_SAMPLES_PER_SCAN 1082
-            float chdata[LMS_MAX_SAMPLES_PER_SCAN], *pchdata = chdata;
+        float chdata[LMS_MAX_SAMPLES_PER_SCAN];
 
+        definition(LmsParser const& self)
+        {
 #define STR2STR(a,b) str_p(a)[push_back_a(self.vec, b) ]
 #define ENUM(dict,...) hex_p[ push_back_mapped_a(self.vec, dict, ## __VA_ARGS__) ]
             full_grammar =
@@ -431,8 +430,7 @@ struct LmsParser : public grammar<LmsParser>
                         | STR2STR("mLMPsetscancfg", "set-scan-cfg") >> ENUM(scan_cfg_status_map)[ack_a(self.vec,0)] >> !(u32 >> u32 >> u32 >> u32 >> u32)
                         )
                 | str_p("EA") >> (
-                        STR2STR("LMDscandata", "scanning") >> bool_1
-                        )
+                        STR2STR("LMDscandata", "scanning") >> bool_1)
                 | str_p("RA") >> (
                         STR2STR("8", "device-ready") >> bool_1
                         | STR2STR("STlms", "device-status") >> ENUM(device_status_map) >> bool_0 >> ignore >> str >> ignore >> str >> u32 >> u32 >> u32
@@ -454,20 +452,24 @@ struct LmsParser : public grammar<LmsParser>
                 >> hex_p[ var(scaler.u) = arg1 ] >> repeat_p(3)[ignore] >> hex_p[ var(j) = arg1 ]
                 >> for_p(var(n)=0 , var(n) < var(j) , var(n)++)[
                     hex_p[
-                        if_((arg1 > 0) && (arg1 * var(scaler.f) < val(2e4f))) [
-                            var(chdata)[var(n)] = arg1 * var(scaler.f)
+                        var(chdata)[var(n)] = var(scaler.f) * construct_<float>(arg1)
+                    /*
+                        if_((arg1 > 0) && (var(scaler.f) * arg1 < val(2e4f))) [
+                            var(chdata)[var(n)] = var(scaler.f) * arg1
                         ] .else_ [
                             if_(var(n) > 0) [
                                 var(chdata)[var(n)] = var(chdata)[ var(n)-1 ]
                             ] .else_ [
                                 var(chdata)[var(n)] = val(0.0f)
                             ]
-                        ] ]
+                        ]
+                    */
+                        ]
                     ]
-                    [ send_data_a(self.channel_receiver, ch_idx, n, pchdata) ];
+                    [ send_data_a(self.channel_receiver, ch_idx, n, chdata) ];
 
             u32 = hex_p[push_back_u32_a(self.vec)];
-            u8 = hex_p[push_back_int_a(self.vec)]; // convert to long since max knows no better
+            u8 = hex_p[push_back_int_a(self.vec)];
             i32 = hex_p[push_back_int_a(self.vec)];
             ignore = lexeme_d[+graph_p];
             str = lexeme_d[+graph_p][ push_back_str_a(self.vec) ];

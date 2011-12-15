@@ -2,6 +2,7 @@
 
 #include <boost/lexical_cast.hpp>
 #include <boost/bind.hpp>
+#include <boost/foreach.hpp>
 
 #include <iostream>
 #include <vector>
@@ -10,11 +11,16 @@
 
 using boost::lexical_cast;
 
+#define BOOST_TEST_MODULE Lms100_test
+#include <boost/test/unit_test.hpp>
+
 // test "adapter"
 std::string parse(const std::string& str, const Lms100::ChannelReceiver& channel_receiver = NULL)
 {
     std::string res = "";
+    BOOST_TEST_CHECKPOINT( "About to parse a message" );
     std::deque< Lms100::Atomic > lst = Lms100::parseMsg(str, channel_receiver);
+    BOOST_TEST_CHECKPOINT( "Message parsed, converting to string" );
     std::deque< Lms100::Atomic >::iterator it = lst.begin();
     for(; it != lst.end() ; ++it) {
         if (res != "") res += ' ';
@@ -28,12 +34,12 @@ struct ChannelEater {
     typedef std::map<int, chdata_t> channels_t;
     channels_t chdata;
     void eat(int chnum, int chsize, const float * data) {
+        BOOST_TEST_CHECKPOINT( " Eating data: chnum: "
+                << chnum << " chsize: " << chsize << " chdata: " << data );
         std::copy(data, data+chsize, back_inserter(chdata[chnum]));
+        BOOST_TEST_CHECKPOINT( "Data was succesfully eaten" );
     }
 };
-
-#define BOOST_TEST_MODULE Lms100_test
-#include <boost/test/unit_test.hpp>
 
 BOOST_AUTO_TEST_CASE( parser_test )
 {
@@ -103,10 +109,10 @@ BOOST_AUTO_TEST_CASE( parser_test )
     BOOST_CHECK_EQUAL( parse("RA STlms A 2 foo bar baz quux 1188FFCC 1188FFCC 1188FFCC"),
             "device-status reserved 0 bar quux 294191052 294191052 294191052");
     BOOST_CHECK_EQUAL( parse("RA STlms B 2 foo bar baz quux FFFFFFFF FFFFFFFF FFFFFFFF"),
- "device-status reserved 0 bar quux 4.29497e+09 4.29497e+09 4.29497e+09");
+ "device-status reserved 0 bar quux 4294967295 4294967295 4294967295");
 
     BOOST_CHECK_EQUAL( parse("RA LMPscancfg FFFFFFFF FF FFFFFFFF FFFFFFFF FFFFFFFF"),
-            "scan-config 4.29497e+09 255 4.29497e+09 -1 -1");
+            "scan-config 4294967295 255 4294967295 -1 -1");
 
     BOOST_CHECK_EQUAL( parse("RA F1 0 FF FF"), "mean-filter 0 255 255");
     BOOST_CHECK_EQUAL( parse("RA F1 1 FF FF"), "mean-filter 1 255 255");
@@ -118,7 +124,9 @@ BOOST_AUTO_TEST_CASE( parser_test )
         " FFFFFFFF FFFFFFFF 1" // 1 encoder
         " FFFFFFFF FFFF"
         " 1" // 1 16-bit channel
-        " DIST1 00000000 00000000 00000000 1000 5" // channel description
+        " DIST1"
+        " 3E9C4000" // 20000.0/((float)0xFFFF) as hexadecimal IEEE float
+        " 00000000 00000000 1000 5" // channel description
         " 0000 0001 8000 0003 FFFF" // channel data
         " 0" // 0 8-bit channels
         " 0" // no position data
@@ -134,9 +142,11 @@ BOOST_AUTO_TEST_CASE( parser_test )
                 boost::bind(&ChannelEater::eat, &channel_eater, _1, _2, _3));
         BOOST_CHECK_EQUAL( channel_eater.chdata.size(), 1 );
         BOOST_CHECK_EQUAL( channel_eater.chdata[0].size(), 5 );
-        BOOST_CHECK_CLOSE( channel_eater.chdata[0][0], 0.0f, 1e-6f );
-        BOOST_CHECK_CLOSE( channel_eater.chdata[0][2], 0.5f, 1e-2f );
-        BOOST_CHECK_CLOSE( channel_eater.chdata[0][4], 1.0f, 1e-6f );
+        BOOST_CHECK_CLOSE( channel_eater.chdata[0][0], 0.0f, .1 );
+        BOOST_CHECK_CLOSE( channel_eater.chdata[0][1], 0.305f, .1 );
+        BOOST_CHECK_CLOSE( channel_eater.chdata[0][2], 10000.0f, .1 );
+        BOOST_CHECK_CLOSE( channel_eater.chdata[0][3], 0.916f, .1 );
+        BOOST_CHECK_CLOSE( channel_eater.chdata[0][4], 20000.0f, .1 );
     }
 }
 
