@@ -14,8 +14,8 @@ using boost::lexical_cast;
 std::string parse(const std::string& str, const Lms100::ChannelReceiver& channel_receiver = NULL)
 {
     std::string res = "";
-    std::deque< mxx::Atomic > lst = Lms100::parseMsg(str, channel_receiver);
-    std::deque< mxx::Atomic >::iterator it = lst.begin();
+    std::deque< Lms100::Atomic > lst = Lms100::parseMsg(str, channel_receiver);
+    std::deque< Lms100::Atomic >::iterator it = lst.begin();
     for(; it != lst.end() ; ++it) {
         if (res != "") res += ' ';
         res += lexical_cast<std::string>(*it);
@@ -127,7 +127,7 @@ BOOST_AUTO_TEST_CASE( parser_test )
         " 0" // no time info
         " 0"; // no event info
 
-    char * XX[] = { "RA", "SN" };
+    const char * XX[] = { "RA", "SN" };
     for(int i = 0; i<2; ++i) {
         ChannelEater channel_eater;
         parse(std::string(XX[i]) + scan_data,

@@ -7,6 +7,7 @@
 #include <netdb.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <errno.h>
 
 // uncomment to debug the parser
 //#define BOOST_SPIRIT_DEBUG
@@ -23,52 +24,55 @@
 #include <boost/assign/list_of.hpp>
 #include <boost/bind.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/algorithm/string/join.hpp>
+#include <boost/range/adaptor/transformed.hpp>
+#include <boost/regex.hpp>
 
 #include <iostream>
 #include <deque>
+#include <iostream>
 
 using namespace boost::assign;
 using boost::lexical_cast;
+using namespace boost::adaptors;
+using namespace boost::algorithm;
 
-template<> const char * Lms100::SickTraits< long >::fmt = "%lX";
-template<> const char * Lms100::SickTraits< float >::fmt = "%f";
-template <> std::string Lms100::sickFormat(char * val) const { return val; }
-template <> std::string Lms100::sickFormat(t_atom * atom) const
-{
-    switch(atom_gettype(atom)) {
-        case A_LONG: return sickFormat(atom_getlong(atom));
-        case A_FLOAT: return sickFormat(atom_getfloat(atom));
-        case A_SYM: return sickFormat(atom_getsym(atom)->s_name);
-        default: postError("unsupported atom type"); return "";
-    }
-}
+#define SEND(head, ...) send_impl( (list_of(Atomic(head)), ## __VA_ARGS__) )
+#define LIST(head,...) (list_of(Atomic(head)), ## __VA_ARGS__)
+
 std::string Lms100::STX = "\x2s", Lms100::ETX = "\x3";
 
-void Lms100::connect( const char * _connect_, long argc, t_atom * argv )
+struct SickFormat : boost::static_visitor< std::string > {
+    template< typename T >
+        std::string format(const char * fmt, T val, size_t len = 32) const
+        {
+            char buffer[ len ];
+            snprintf(buffer, len, fmt, val);
+            return buffer;
+        }
+
+    std::string operator()(long val) const { return format("%lX", val); }
+    std::string operator()(float val) const { return format("%f", val); }
+    std::string operator()(const std::string& val) const { return val; }
+};
+std::string Lms100::sickFormat(const Atomic& atom) {
+    return boost::apply_visitor( SickFormat(), atom );
+}
+
+void Lms100::connect( const char * host, int port)
 {
-    std::string host_str = "192.168.0.1";
-    long port = 2112;
-
-    if (argc>0)
-        host_str = lexical_cast<std::string>(argv[0]);
-
-    if (argc>1)
-        port = lexical_cast<long>(argv[1]);
-
-    const char * host = host_str.c_str();
-
     struct hostent * host_ent;
     struct sockaddr_in addr;
 
     if ((host_ent = gethostbyname(host)) == NULL) {
-        postError("can't resolve net address '%s'", host);
-        postOSError();
+        fprintf(stderr,"can't resolve net address '%s'\n", host);
+        perror("LMS100");
         return;
     }
 
     if ((sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
-        postError("can't create socket");
-        postOSError();
+        fprintf(stderr,"can't create socket\n");
+        perror("LMS100");
         return;
     }
 
@@ -78,94 +82,44 @@ void Lms100::connect( const char * _connect_, long argc, t_atom * argv )
     addr.sin_port        = htons(port);
 
     if (::connect(sock, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
-        postError("error connecting to %s:%d", host, port);
-        postOSError();
+        fprintf(stderr,"error connecting to %s:%d\n", host, port);
+        perror("LMS100");
         // this cleans the socket up even though we haven't connected
         disconnect();
         return;
     }
 
-    if (fcntl(sock, F_SETFL, O_NONBLOCK) < 0) {
-        postError("couldn't make socket non blocking");
-        postOSError();
-        disconnect();
-        return;
-    }
-
-    qelem_set(recvQueue);
-
-    //postMessage("connected to %s:%d", host, port);
-    OUTLET(msg_out, "connected");
+    printf("connected to %s:%d\n", host, port);
 }
 
 void Lms100::disconnect()
 {
     if (sock > -1) {
-        qelem_unset(recvQueue);
         close(sock);
         sock = -1;
-        postMessage("disconnected");
+        printf("disconnected\n");
     } else {
-        postError("already disconnected");
+        fprintf(stderr,"already disconnected\n");
     }
 }
 
-void Lms100::send_meth(const char * _send_, long argc, t_atom * argv)
+void Lms100::send_impl( const std::vector< Atomic >& argv )
 {
-
-    /*
-     * FIXME: refactor via send
-     */
     std::string buffer = STX;
-
-    int i;
-    for (i = 0; i < argc; i++) {
-        buffer += sickFormat(argv+i);
-        if (i<(argc-1)) buffer += ' ';
-    }
-
+    buffer += join(argv | transformed(sickFormat), " ");
     buffer += ETX;
 
     if (sock < 0) {
-        postError("can't send, connect first");
-        postWarning("would have sent '%s'", buffer.c_str());
+        fprintf(stderr,"can't send, connect first\n");
+        fprintf(stderr,"would have sent '%s'\n", buffer.c_str());
         return;
     }
 
-    // FIXME may return -1 (errno==EAGAIN) if send would block
     if (::send(sock, buffer.c_str(), buffer.length(), 0) != buffer.length()) {
-        postError("something's wrong, sent less bytes then expected");
-        postOSError();
+        fprintf(stderr,"something's wrong, sent less bytes then expected\n");
+        perror("LMS100");
     } else {
-        postMessage("sent '%s'", buffer.c_str());
-    }
-}
-
-void Lms100::send_impl( const std::vector< mxx::Atomic >& argv )
-{
-    std::string buffer = STX;
-
-    int argc = argv.size(), i;
-    for (i = 0; i < argc; i++) {
-        t_atom a = mxx::to_atom(argv[i]);
-        buffer += sickFormat(&a);
-        if (i<(argc-1)) buffer += ' ';
-    }
-
-    buffer += ETX;
-
-    if (sock < 0) {
-        postError("can't send, connect first");
-        postWarning("would have sent '%s'", buffer.c_str());
-        return;
-    }
-
-    // FIXME may return -1 (errno==EAGAIN) if send would block
-    if (::send(sock, buffer.c_str(), buffer.length(), 0) != buffer.length()) {
-        postError("something's wrong, sent less bytes then expected");
-        postOSError();
-    } else {
-        postMessage("sent '%s'", buffer.c_str());
+        printf("sent '%s'\n", buffer.c_str());
     }
 }
 
@@ -184,7 +138,7 @@ void Lms100::recv()
     int recvd = 0;
 
     if (sock < 0) {
-        postError("attempt to receive while not connected");
+        fprintf(stderr,"attempt to receive while not connected\n");
         return;
     }
 
@@ -197,12 +151,12 @@ void Lms100::recv()
                 if (errno == EAGAIN)
                     break;
                 else {
-                    postError("error receiving data");
-                    postOSError();
+                    fprintf(stderr,"error receiving data\n");
+                    perror("LMS100");
                     return;
                 }
             } else if (recvd == 0) {
-                postMessage("connection closed by the server");
+                printf("connection closed by the server\n");
                 disconnect();
                 return;
             }
@@ -219,26 +173,14 @@ void Lms100::recv()
         int parsed = 0;
         while(i != end) {
             std::string reply( *i++ );
-            std::deque<mxx::Atomic> to_spit = parseMsg(reply, boost::bind(&Lms100::sendChannelData, this, _1, _2, _3));
-            if (to_spit.size()>0)
-                outlet(msg_out, to_spit);
+            std::cout << "FIXME handle data std::deque<Atomic> to_spit = parseMsg(reply, boost::bind(&Lms100::sendChannelData, this, _1, _2, _3))\n";
+
+            std::cout << "FIXME if (to_spit.size()>0) outlet(msg_out, to_spit)\n";
             parsed += STX.length() + reply.length() + ETX.length();
         }
         recvLeftover = recvLeftover.substr(parsed);
         write_pos = 0;
     } while(recvd>0);
-
-    // continue polling
-    qelem_set(recvQueue);
-}
-
-void Lms100::sendChannelData(int ch_idx, int data_size, const float * data)
-{
-    if (ch_idx >= 4) {
-        postError("internal: channel index out of range!");
-        return;
-    }
-    outlet(0,data_size,data);
 }
 
 template < typename Container >
@@ -460,9 +402,9 @@ using namespace phoenix;
 struct LmsParser : public grammar<LmsParser>
 {
 
-    std::deque<mxx::Atomic>& vec;
+    std::deque< Lms100::Atomic >& vec;
     const Lms100::ChannelReceiver& channel_receiver;
-    LmsParser( std::deque<mxx::Atomic>& vec_, const Lms100::ChannelReceiver& channel_receiver_ ) : vec(vec_), channel_receiver(channel_receiver_) {}
+    LmsParser( std::deque<Lms100::Atomic>& vec_, const Lms100::ChannelReceiver& channel_receiver_ ) : vec(vec_), channel_receiver(channel_receiver_) {}
 
     template <typename ScannerT>
     struct definition
@@ -560,10 +502,10 @@ struct LmsParser : public grammar<LmsParser>
     };
 };
 
-std::deque<mxx::Atomic> Lms100::parseMsg(const std::string& reply,
+std::deque<Lms100::Atomic> Lms100::parseMsg(const std::string& reply,
         const Lms100::ChannelReceiver& chrecv )
 {
-    std::deque< mxx::Atomic > argv;
+    std::deque< Lms100::Atomic > argv;
 
     LmsParser parser(argv, chrecv);
 
@@ -572,30 +514,6 @@ std::deque<mxx::Atomic> Lms100::parseMsg(const std::string& reply,
     if (info.full)
         return argv;
     else
-        return MXX_LIST( argv.size() ? "misformed-message" : "unknown-message", reply );
+        return LIST( argv.size() ? "misformed-message" : "unknown-message", reply );
 }
 
-#ifndef TESTING
-
-int main()
-{
-    MXX_REGISTER_CLASS(
-            Lms100, "v2_max.sick.lms100",
-            (("connect", connect))
-            (("disconnect", disconnect))
-            (("send", send_meth))
-            (("display", display))
-            (("set-scan-cfg", set_scan_cfg))
-            (("set-access-mode", set_access_mode))
-            (("set-mean-filter", set_mean_filter))
-            (("bang", bang))
-            (("scan-once", bang))
-            (("scan", scan))
-            (("start-measurement", start_measurement))
-            (("request-status", request_status))
-            , 2 // n outlets
-            );
-
-}
-
-#endif
